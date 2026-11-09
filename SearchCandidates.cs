@@ -1,0 +1,6 @@
+namespace DiskLens;
+internal static class SearchCandidates {
+ // SQL is a candidate filter. Non-ASCII paths also pass through so .NET keeps its Unicode/culture semantics.
+ public static string Where(string patterns){var parts=patterns.Split(';',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);var indexedExtensions=new HashSet<string>(StringComparer.OrdinalIgnoreCase){".docx",".doc",".pdf",".txt",".exe",".png",".mp4",".mov",".ppt",".pptx",".jpg",".jpeg",".raw"};if(parts.Length>0&&parts.All(p=>p.StartsWith("*.")&&indexedExtensions.Contains(p[1..])))return "extension IN ("+string.Join(",",parts.Select(p=>Db.Q(p[1..].ToLowerInvariant())))+")";if(parts.Length==0||parts.Length>32||parts.Any(p=>p.Length>4096||p.Any(c=>c<32||c>126)))return "1";var clauses=new List<string>();foreach(var pattern in parts){var literal=pattern.Replace("\\","\\\\").Replace("%","\\%").Replace("_","\\_");if(!pattern.Contains('*')&&!pattern.Contains('?'))clauses.Add($"path LIKE {Db.Q("%"+literal+"%")} ESCAPE '\\'");else{var like=Db.Q(literal.Replace("*","%").Replace("?","_"));clauses.Add($"(path LIKE {like} ESCAPE '\\' OR substr(path,length(rtrim(parent,char(92)))+2) LIKE {like} ESCAPE '\\')");}}return "("+string.Join(" OR ",clauses)+" OR length(path)!=length(CAST(path AS BLOB)))";}
+}
+

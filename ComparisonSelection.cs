@@ -1,0 +1,9 @@
+using System.Globalization;
+namespace DiskLens;
+public static class ComparisonSelection {
+ static string RootKey(string root){if(root.Length==2&&root[1]==':')root+="\\";try{return System.IO.Path.GetFullPath(root).TrimEnd('\\','/');}catch{return root.TrimEnd('\\','/');}}
+ static DateTimeOffset Time(ScanInfo scan)=>DateTimeOffset.TryParse(scan.Date,CultureInfo.InvariantCulture,DateTimeStyles.AssumeUniversal,out var date)?date.ToUniversalTime():DateTimeOffset.MinValue;
+ public static bool Compatible(ScanInfo a,ScanInfo b)=>RootKey(a.Root??"").Equals(RootKey(b.Root??""),StringComparison.OrdinalIgnoreCase)&&(string.IsNullOrEmpty(a.VolumeSerial)||string.Equals(a.VolumeSerial.Trim(),b.VolumeSerial?.Trim(),StringComparison.OrdinalIgnoreCase));
+ public static ScanInfo? Previous(ScanInfo current,IEnumerable<ScanInfo> saved)=>saved.Where(s=>s.Id!=current.Id&&Compatible(current,s)&&Time(s)!=DateTimeOffset.MinValue&&Time(s)<Time(current)).OrderByDescending(Time).FirstOrDefault();
+ public static async Task<int> VerifySaved(string output){try{var store=new Store();var saved=store.History();var current=saved.First(s=>s.Root.Equals("C:\\",StringComparison.OrdinalIgnoreCase));var previous=Previous(current,saved)??throw new IOException("No previous C: snapshot found");var data=await Task.Run(()=>InvestigationStore.Changes(store,current,previous,CancellationToken.None));File.WriteAllText(output,System.Text.Json.JsonSerializer.Serialize(new{Current=current.Id,CurrentDate=current.Date,Previous=previous.Id,PreviousDate=previous.Date,CompatibleScans=saved.Count(s=>Compatible(current,s)),DisplayedRows=data.Rows.Count,Summary=data.Summary},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));return 0;}catch(Exception e){File.WriteAllText(output+".error.txt",e.ToString());return 1;}}
+}

@@ -1,0 +1,17 @@
+using System.Buffers.Binary;
+using System.Buffers;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+namespace DiskLens;
+internal readonly record struct ScanEntry(byte Kind,string Path,long Size,long Modified,string Detail="");
+internal static class ScanWire {
+ internal const int MaxEntries=128,MaxBytes=1024*1024;
+ public static async Task<ScanEntry[]?> Read(Stream stream,CancellationToken ct){var header=new byte[4];await stream.ReadExactlyAsync(header,ct);int length=BinaryPrimitives.ReadInt32LittleEndian(header);if(length==0)return null;if(length<2||length>MaxBytes)throw new IOException("Invalid filesystem-worker frame length");var payload=ArrayPool<byte>.Shared.Rent(length);try{await stream.ReadExactlyAsync(payload.AsMemory(0,length),ct);using var reader=new BinaryReader(new MemoryStream(payload,0,length,false),Encoding.UTF8);int count=reader.ReadUInt16();if(count<1||count>MaxEntries)throw new IOException("Invalid filesystem-worker batch count");var entries=new ScanEntry[count];for(int i=0;i<count;i++){byte kind=reader.ReadByte();string path=reader.ReadString();if(kind>2||path.Length>32768)throw new IOException("Invalid filesystem-worker record");long size=reader.ReadInt64(),modified=reader.ReadInt64();string detail=kind==2?reader.ReadString():"";if(detail.Length>8192||size<0||modified<0||modified>DateTime.MaxValue.Ticks)throw new IOException("Invalid filesystem-worker metadata");entries[i]=new(kind,path,size,modified,detail);}if(reader.BaseStream.Position!=length)throw new IOException("Trailing filesystem-worker data");return entries;}finally{ArrayPool<byte>.Shared.Return(payload);}}
+}
+public static class Worker {
+ public static int Run(){using var output=Console.OpenStandardOutput();using var payload=new MemoryStream(64*1024);using var writer=new BinaryWriter(payload,Encoding.UTF8,true);var buffer=new List<ScanEntry>(ScanWire.MaxEntries);var interval=Stopwatch.StartNew();int bufferedBytes=0;
+ void Flush(){if(buffer.Count==0)return;payload.SetLength(0);writer.Write((ushort)buffer.Count);foreach(var entry in buffer){writer.Write(entry.Kind);writer.Write(entry.Path);writer.Write(entry.Size);writer.Write(entry.Modified);if(entry.Kind==2)writer.Write(entry.Detail.Length>8192?entry.Detail[..8192]:entry.Detail);}writer.Flush();Span<byte> header=stackalloc byte[4];BinaryPrimitives.WriteInt32LittleEndian(header,checked((int)payload.Length));output.Write(header);output.Write(payload.GetBuffer(),0,(int)payload.Length);output.Flush();buffer.Clear();bufferedBytes=0;interval.Restart();}
+ void Add(ScanEntry entry){int entryBytes=Encoding.UTF8.GetByteCount(entry.Path)+Encoding.UTF8.GetByteCount(entry.Detail[..Math.Min(8192,entry.Detail.Length)])+40;if(bufferedBytes+entryBytes>ScanWire.MaxBytes-2)Flush();buffer.Add(entry);bufferedBytes+=entryBytes;if(buffer.Count==ScanWire.MaxEntries||interval.ElapsedMilliseconds>=100)Flush();}
+ string? request;while((request=Console.ReadLine())!=null){var dir=JsonSerializer.Deserialize<string>(request)!;try{foreach(var f in new DirectoryInfo(dir).EnumerateFileSystemInfos()){try{if((f.Attributes&FileAttributes.ReparsePoint)!=0)continue;Add(new(f is DirectoryInfo?(byte)1:(byte)0,f.FullName,f is FileInfo fi?fi.Length:0,f.LastWriteTimeUtc.Ticks));}catch(Exception ex){Add(new(2,f.FullName,0,0,ex.Message));}}}catch(Exception ex){Add(new(2,dir,0,0,ex.Message));}Flush();output.Write(new byte[4]);output.Flush();}return 0;}
+}
